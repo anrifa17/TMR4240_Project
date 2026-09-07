@@ -85,13 +85,22 @@ class Wind:
     def __init__(self, mean_speed: float = 0.0, beta: float = 0.0, *,
                  semantics: str = "from", sigma_slow: float = 0.0,
                  tau_slow: float = 120.0, seed: int | None = None):
-        # TODO: Store and use the parameters above in step().
+        if semantics not in ("towards", "from"):
+            raise ValueError(
+                f"semantics must be 'towards' or 'from', got {semantics!r}")
         self.mean_speed = float(mean_speed)
         self.beta = float(beta)
         self.semantics = semantics
         self.sigma_slow = float(sigma_slow)
         self.tau_slow = float(tau_slow)
         self.seed = seed
+
+        offset = np.pi if semantics == "from" else 0.0
+        self._beta_towards = float(np.arctan2(np.sin(self.beta + offset),
+                                              np.cos(self.beta + offset)))
+        self._alpha_deg, self._C6 = load_wind_coefficients()
+        self._rng = np.random.default_rng(seed)
+        self._u_slow = 0.0
 
     def step(
         self,
@@ -100,8 +109,26 @@ class Wind:
         eta: np.ndarray,
         nu: np.ndarray,
     ) -> Tuple[np.ndarray, Dict[str, float]]:
-        # TODO: Replace this placeholder with your wind load model.
-        # Default: no wind loads.
-        tau_w6 = np.zeros(6)
-        info = {"U": 0.0, "beta_ned": 0.0, "alpha_body": 0.0}
+        if self.sigma_slow > 0.0 and self.tau_slow > 0.0:
+            a = np.exp(-dt / self.tau_slow)
+            self._u_slow = (a * self._u_slow + self.sigma_slow
+                            * np.sqrt(1.0 - a ** 2) * self._rng.standard_normal())
+        U = max(self.mean_speed + self._u_slow, 0.0)
+
+        psi = float(eta[5])
+        V_n = U * np.cos(self._beta_towards)
+        V_e = U * np.sin(self._beta_towards)
+        c, s = np.cos(psi), np.sin(psi)
+        V_rw_x = c * V_n + s * V_e - float(nu[0])
+        V_rw_y = -s * V_n + c * V_e - float(nu[1])
+
+        U_rw = float(np.hypot(V_rw_x, V_rw_y))
+        alpha_rw = float(np.arctan2(V_rw_y, V_rw_x))
+
+        alpha_deg = np.rad2deg(alpha_rw) % 360.0
+        C6 = np.array([np.interp(alpha_deg, self._alpha_deg, self._C6[:, j])
+                       for j in range(6)])
+        tau_w6 = U_rw ** 2 * C6
+
+        info = {"U": U, "beta_ned": self._beta_towards, "alpha_body": alpha_rw}
         return tau_w6, info
