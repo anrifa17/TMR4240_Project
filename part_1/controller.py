@@ -44,6 +44,7 @@ Constructor contract — the automated checks (``python check.py``, ``pytest``,
 constructor defaults. Tuning only inside ``run_case_part1.py`` will pass your
 own runs but fail the checks.
 """
+
 import numpy as np
 
 
@@ -72,10 +73,113 @@ class DPController:
         nu_ref: np.ndarray | None = None,
         acc_ref: np.ndarray | None = None,
     ) -> np.ndarray:
-        # TODO: Replace this placeholder with your DP controller.
         # Return the (6,) desired BODY wrench — fill in tau_d[0] = Fx,
         # tau_d[1] = Fy, tau_d[5] = Mz and leave the rest zero.
+
         return np.zeros(6)
 
+    def is_positive_definite(self, A: np.ndarray, tol: float = 1e-12) -> bool:
+        """Checks if A is square, symmetric, and positive definite (all eigenvalues > 0)."""
+        # A must be square
+        if A.ndim != 2 or A.shape[0] != A.shape[1]:
+            print("A is not square")
+            return False
 
-    
+        # A must be symmetric
+        if not np.allclose(A, A.T, atol=tol):
+            print("A is not symmetric")
+            return False
+
+        # All eigenvalues must be strictly > 0 (with tolerance for floating-point noise)
+        eigvals = np.linalg.eigvalsh(A)
+        if not np.all(eigvals > 0):
+            print(
+                f"Not all eigenvalues are > 0 (Min eigenvalue: {np.min(eigvals):.3e})"
+            )
+            return False
+
+        return True
+
+    def is_positive_semidefinite(self, A: np.ndarray, tol: float = 1e-12) -> bool:
+        """Checks if A is square, symmetric, and positive semi-definite (all eigenvalues >= 0)."""
+        # A must be square
+        if A.ndim != 2 or A.shape[0] != A.shape[1]:
+            print("A is not square")
+            return False
+
+        # A must be symmetric
+        if not np.allclose(A, A.T, atol=tol):
+            print("A is not symmetric")
+            return False
+
+        # All eigenvalues must be >= 0 (allowing for minor negative numerical noise down to -tol)
+        eigvals = np.linalg.eigvalsh(A)
+        if not np.all(eigvals >= -tol):
+            print(
+                f"Not all eigenvalues are >= 0 (Min eigenvalue: {np.min(eigvals):.3e})"
+            )
+            return False
+
+        return True
+
+    def is_controllable(self, A: np.ndarray, B: np.ndarray) -> bool:
+        # A must be square
+        if A.ndim != 2 or A.shape[0] != A.shape[1]:
+            print("A is not square")
+            return False
+
+        # A is nxn, B is nxm
+        n = A.shape[0]
+        m = B.shape[1]
+
+        if B.shape[0] != n:
+            print(f"B does not have {n} rows")
+            return False
+
+        blocks = [np.linalg.matrix_power(A, i) @ B for i in range(n)]
+        M_c = np.hstack(blocks)  # Controllability matrix
+        rank = np.linalg.matrix_rank(M_c)
+
+        return rank == n
+
+
+def tests():
+    controller = DPController()
+
+    max_xi = [2, 2, 5 / (2 * np.pi)]
+    max_ui = [160e3, 112e3, 1424e3]
+
+    Q = np.zeros((3, 3))
+    R = np.zeros_like(Q)
+    for i in range(3):
+        Q[i][i] = 1 / max_xi[i] ** 2
+        R[i][i] = 1 / max_ui[i] ** 2
+
+    # Make the system matrices
+    M3 = np.array(
+        [[6.007e5, 0.0, 0.0], [0.0, 7.067e5, -4.733e5], [0.0, -5.712e5, 5.456e7]]
+    )
+
+    D3 = np.array([[1117.6, 0.0, 0.0], [0.0, 2.229e4, 0.0], [0.0, 0.0, 1.95e6]])
+
+    # Compute M3_inv directly to preserve full precision (or use predefined M3_inv)
+    M3_inv = np.linalg.inv(M3)
+
+    # Block dimensions (3x3)
+    O3 = np.zeros((3, 3))
+    I3 = np.eye(3)
+
+    # Construct block matrices A_c (6x6) and B_c (6x3)
+    A_c = np.block([[O3, I3], [O3, -M3_inv @ D3]])
+    B_c = np.block([[O3], [M3_inv]])
+
+    print(f"Q is positive semi-definite: {controller.is_positive_semidefinite(Q)}")
+    print(f"R is positive semi-definite: {controller.is_positive_definite(R)}")
+    print(f"(A,B) is controllable: {controller.is_controllable(A_c,B_c)}")
+
+
+def main():
+    tests()
+
+
+main()
