@@ -76,3 +76,6 @@ class DPController:
         # Return the (6,) desired BODY wrench — fill in tau_d[0] = Fx,
         # tau_d[1] = Fy, tau_d[5] = Mz and leave the rest zero.
         return np.zeros(6)
+
+
+    
