@@ -59,7 +59,31 @@ class DPController:
     """
 
     def __init__(self, *args, **kwargs):
-        pass
+        # Physical 3-DOF matrices
+        self.M3 = np.array(
+            [[6.007e5, 0.0, 0.0], [0.0, 7.067e5, -4.733e5], [0.0, -5.712e5, 5.456e7]]
+        )
+        self.D3 = np.array(
+            [[1117.6, 0.0, 0.0], [0.0, 2.229e4, 0.0], [0.0, 0.0, 1.95e6]]
+        )
+        self.M3_inv = np.linalg.inv(self.M3)
+
+        # State-space matrices
+        O3 = np.zeros((3, 3))
+        I3 = np.eye(3)
+        self.A_c = np.block([[O3, I3], [O3, -self.M3_inv @ self.D3]])
+        self.B_c = np.block([[O3], [self.M3_inv]])
+
+        # Tuning weights
+        ## Q matrix penalizes position (0:3) and velocity (3:6) errors
+        self.Q = np.diag([0.25, 0.25, 1.5791367, 4, 4, 100])
+
+        # R penalizes actuator usage
+        self.R = np.diag([3.90625000e-11, 7.97193878e-11, 4.93151117e-13])
+
+        # Gain matrix K
+        P = solve_continuous_are(a=self.A_c, b=self.B_c, q=self.Q, r=self.R)
+        self.K = np.linalg.inv(self.R) @ self.B_c.T @ P
 
     def reset(self) -> None:
         """Optional: reset internal states (integrators, filters) before a run."""
@@ -78,25 +102,34 @@ class DPController:
         # Return the (6,) desired BODY wrench — fill in tau_d[0] = Fx,
         # tau_d[1] = Fy, tau_d[5] = Mz and leave the rest zero.
 
+        J = Rz(eta[5])  # rotation matrix
+
         # Get inputs
-        eta3_n = [eta[0], eta[1], eta[5]]  # NED
-        nu3_b = [nu[0], nu[1], nu[5]]  # BODY
+        eta3_n = np.array([eta[0], eta[1], eta[5]])  # NED, current state
+        nu3_b = np.array([nu[0], nu[1], nu[5]])  # BODY, current velocity,
 
-        eta3_ref_n = [eta_ref[0], eta_ref[1], eta_ref[5]]  # NED
-        nu3_ref_b = [nu_ref[0], nu_ref[1], nu_ref[5]]  # BODY
+        eta3_ref_n = np.array(
+            [eta_ref[0], eta_ref[1], eta_ref[5]]
+        )  # NED, reference position
 
-        e_N = eta[0] - eta_ref[0]  # Error in N, NED
-        e_E = eta[1] - eta_ref[1]  # Error in E, NED
-        e_psi = wrap_angle_pi(eta[5] - eta_ref[5])  # Heading error psi, NED
+        if not nu_ref is None:
+            nu3_ref_n = np.array(
+                [nu_ref[0], nu_ref[1], nu_ref[5]]
+            )  # NED, reference velocity
 
-        J = Rz(e_psi)
-        e_eta3_n = [e_N, e_E, e_psi]  # Error matrix, NED
-        e_eta3_b = J.T @ e_eta3_n  # Error matrix, BODY
+        nu3_ref_b = J.T @ nu3_ref_n  # BODY, reference velocity
 
-        e_nu3_b = nu3_b - nu3_ref_b  # BODY
+        e_N = eta[0] - eta_ref[0]  # NED, error in N
+        e_E = eta[1] - eta_ref[1]  # NED, error in E
+        e_psi = wrap_angle_pi(eta[5] - eta_ref[5])  # NED, heading error psi
+
+        e_eta3_n = np.array([e_N, e_E, e_psi])  # NED, error matrix position
+        e_eta3_b = J.T @ e_eta3_n  #  BODY, error matrix position
+
+        e_nu3_b = nu3_b - nu3_ref_b  # BODY, error matrix velocity
 
         # State vector
-        x_c = np.stack(e_eta3_b.T, e_nu3_b)  # BODY
+        x_c = np.hstack((e_eta3_b.T, e_nu3_b))  # BODY, state vector
 
         # State matrices
         O3 = np.zeros((3, 3))
@@ -130,30 +163,9 @@ class DPController:
         P = solve_continuous_are(a=A_c, b=B_c, q=self.Q, r=self.R)
         K = np.linalg.inv(self.R) @ B_c.T @ P
         u = -K @ x_c
-        return [u[0], u[1], 0, 0, 0, u[5]]
+        return [u[0], u[1], 0, 0, 0, u[2]]
 
-    # TUNING WEIGHTS
-    Q = np.array([[0.25, 0.00, 0.00], [0.00, 0.25, 0.00], [0.00, 0.00, 1.5791367]])
-
-    R = np.array(
-        [
-            [3.90625000e-11, 0.00000000e00, 0.00000000e00],
-            [0.00000000e00, 7.97193878e-11, 0.00000000e00],
-            [0.00000000e00, 0.00000000e00, 4.93151117e-13],
-        ]
-    )
-
-    # CONSTANTS
-    M3 = np.array(
-        [[6.007e5, 0.0, 0.0], [0.0, 7.067e5, -4.733e5], [0.0, -5.712e5, 5.456e7]]
-    )
-
-    D3 = np.array([[1117.6, 0.0, 0.0], [0.0, 2.229e4, 0.0], [0.0, 0.0, 1.95e6]])
-
-    # Compute M3_inv directly to preserve full precision (or use predefined M3_inv)
-    M3_inv = np.linalg.inv(M3)
-
-    # HELPERS
+    # HELPERS START
     def is_positive_definite(self, A: np.ndarray, tol: float = 1e-12) -> bool:
         """Checks if A is square, symmetric, and positive definite (all eigenvalues > 0)."""
         # A must be square
@@ -217,48 +229,25 @@ class DPController:
         rank = np.linalg.matrix_rank(M_c)
 
         return rank == n
-
+    # HELPERS END
 
 def tests():
     controller = DPController()
 
-    max_xi = [2, 2, 5 / (2 * np.pi)]
-    max_ui = [160e3, 112e3, 1424e3]
-
-    Q = np.zeros((3, 3))
-    R = np.zeros_like(Q)
-    for i in range(3):
-        Q[i][i] = 1 / max_xi[i] ** 2
-        R[i][i] = 1 / max_ui[i] ** 2
-
-    print(Q)
-    print(R)
-
-    # Make the system matrices
-    M3 = np.array(
-        [[6.007e5, 0.0, 0.0], [0.0, 7.067e5, -4.733e5], [0.0, -5.712e5, 5.456e7]]
+    print(
+        f"Q is positive semi-definite: {controller.is_positive_semidefinite(controller.Q)}"
     )
-
-    D3 = np.array([[1117.6, 0.0, 0.0], [0.0, 2.229e4, 0.0], [0.0, 0.0, 1.95e6]])
-
-    # Compute M3_inv directly to preserve full precision (or use predefined M3_inv)
-    M3_inv = np.linalg.inv(M3)
-
-    # Block dimensions (3x3)
-    O3 = np.zeros((3, 3))
-    I3 = np.eye(3)
-
-    # Construct block matrices A_c (6x6) and B_c (6x3)
-    A_c = np.block([[O3, I3], [O3, -M3_inv @ D3]])
-    B_c = np.block([[O3], [M3_inv]])
-
-    print(f"Q is positive semi-definite: {controller.is_positive_semidefinite(Q)}")
-    print(f"R is positive semi-definite: {controller.is_positive_definite(R)}")
-    print(f"(A,B) is controllable: {controller.is_controllable(A_c,B_c)}")
+    print(
+        f"R is positive semi-definite: {controller.is_positive_definite(controller.R)}"
+    )
+    print(
+        f"(A,B) is controllable: {controller.is_controllable(controller.A_c,controller.B_c)}"
+    )
 
 
 def main():
     tests()
 
 
-main()
+if __name__ == "__main__":
+    main()
