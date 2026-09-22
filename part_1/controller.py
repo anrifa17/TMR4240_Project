@@ -104,28 +104,26 @@ class DPController:
 
         J = Rz(eta[5])  # rotation matrix
 
-        # Get inputs
-        eta3_n = np.array([eta[0], eta[1], eta[5]])  # NED, current state
+        # eta
+        # --- Nothing to handle here
+
+        # nu
         nu3_b = np.array([nu[0], nu[1], nu[5]])  # BODY, current velocity,
+        nu3_ref_b = np.zeros_like(nu3_b)  # BODY, reference velocity
 
-        eta3_ref_n = np.array(
-            [eta_ref[0], eta_ref[1], eta_ref[5]]
-        )  # NED, reference position
-
-        if not nu_ref is None:
+        if not nu_ref is None:  # if nu_ref is defined
             nu3_ref_n = np.array(
                 [nu_ref[0], nu_ref[1], nu_ref[5]]
             )  # NED, reference velocity
+            nu3_ref_b = J.T @ nu3_ref_n  # BODY, update reference velocity
 
-        nu3_ref_b = J.T @ nu3_ref_n  # BODY, reference velocity
-
+        # state errors
         e_N = eta[0] - eta_ref[0]  # NED, error in N
         e_E = eta[1] - eta_ref[1]  # NED, error in E
         e_psi = wrap_angle_pi(eta[5] - eta_ref[5])  # NED, heading error psi
 
         e_eta3_n = np.array([e_N, e_E, e_psi])  # NED, error matrix position
         e_eta3_b = J.T @ e_eta3_n  #  BODY, error matrix position
-
         e_nu3_b = nu3_b - nu3_ref_b  # BODY, error matrix velocity
 
         # State vector
@@ -229,20 +227,52 @@ class DPController:
         rank = np.linalg.matrix_rank(M_c)
 
         return rank == n
+
     # HELPERS END
+
+    # INFORMATION RETRIEVAL START
+    def LQRConditions(self) -> str:
+        """Returns LQR conditions status"""
+        s = ""
+        s += f"    Q is {'NOT ' if not self.is_positive_semidefinite(self.Q) else ''}positive semi-definite\n"
+        s += f"    R is {'NOT ' if not self.is_positive_definite(self.R) else ''}positive definite\n"
+        s += f"(A,B) is {'NOT ' if not self.is_controllable(self.A_c, self.B_c) else ''}controllable"
+        return s
+
+    # INFORMATION RETRIEVAL END
+
 
 def tests():
     controller = DPController()
+    print(
+        f"Controller initialized successfully. Gain matrix K shape: {controller.K.shape}"
+    )
 
-    print(
-        f"Q is positive semi-definite: {controller.is_positive_semidefinite(controller.Q)}"
-    )
-    print(
-        f"R is positive semi-definite: {controller.is_positive_definite(controller.R)}"
-    )
-    print(
-        f"(A,B) is controllable: {controller.is_controllable(controller.A_c,controller.B_c)}"
-    )
+    # Test computation step
+    eta = np.array([0.0, -1.0, 0.0, 0.0, 0.0, 180.0])
+    nu = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    eta_ref = np.zeros(6)
+    print(controller.LQRConditions())
+    tau = controller.compute(0.0, 0.01, eta, nu, eta_ref)
+    print_force_vector_kn(tau)
+
+
+def print_force_vector_kn(vec, precision=2):
+    """
+    GEMINI made this
+    Formats and prints a 6-DOF force/moment vector converted to kN and kN·m.
+    """
+    labels = ["Fx", "Fy", "Fz", "Mx", "My", "Mz"]
+    units = ["kN ", "kN ", "kN ", "kN·m", "kN·m", "kN·m"]
+
+    # Convert from N (and N·m) to kN (and kN·m)
+    vec_kn = np.asarray(vec, dtype=float) / 1000.0
+
+    print("─── Force Vector Summary ───")
+    for label, val, unit in zip(labels, vec_kn, units):
+        val_str = f"{val:>{precision+8}.{precision}f}"
+        print(f"  {label}: {val_str} {unit}")
+    print("───────────────────────────")
 
 
 def main():
