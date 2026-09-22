@@ -47,6 +47,8 @@ own runs but fail the checks.
 
 import numpy as np
 from scipy.linalg import solve_continuous_are
+from scipy.integrate import solve_ivp, trapezoid, cumulative_trapezoid
+
 from simulation.utils import Rz, wrap_angle_pi
 
 
@@ -76,7 +78,7 @@ class DPController:
 
         # Tuning weights
         ## Q matrix penalizes position (0:3) and velocity (3:6) errors
-        self.Q = np.diag([0.25, 0.25, 1.5791367, 4, 4, 100])
+        self.Q = np.diag([0.04, 0.04, 131.31, 4, 4, 100])
 
         # R penalizes actuator usage
         self.R = np.diag([3.90625000e-11, 7.97193878e-11, 4.93151117e-13])
@@ -129,13 +131,6 @@ class DPController:
         # State vector
         x_c = np.hstack((e_eta3_b.T, e_nu3_b))  # BODY, state vector
 
-        # State matrices
-        O3 = np.zeros((3, 3))
-        I3 = np.eye(3)
-
-        A_c = np.block([[O3, I3], [O3, -self.M3_inv @ self.D3]])
-        B_c = np.block([[O3], [self.M3_inv]])
-
         # Q must be Positive Semi-Definite (Q >= 0)
         if not self.is_positive_semidefinite(self.Q):
             raise ValueError(
@@ -151,16 +146,13 @@ class DPController:
             )
 
         # (A, B) must be Controllable
-        if not self.is_controllable(A_c, B_c):
+        if not self.is_controllable(self.A_c, self.B_c):
             raise ValueError(
                 "The system pair (A, B) is not controllable. "
                 "The rank of the controllability matrix is less than the state dimension."
             )
 
-        # Solve LQR
-        P = solve_continuous_are(a=A_c, b=B_c, q=self.Q, r=self.R)
-        K = np.linalg.inv(self.R) @ B_c.T @ P
-        u = -K @ x_c
+        u = -self.K @ x_c
         return [u[0], u[1], 0, 0, 0, u[2]]
 
     # HELPERS START
@@ -239,22 +231,10 @@ class DPController:
         s += f"(A,B) is {'NOT ' if not self.is_controllable(self.A_c, self.B_c) else ''}controllable"
         return s
 
+    def eigenvalues(self):
+        return np.linalg.eigvals(self.A_c - self.B_c @ self.K)
+
     # INFORMATION RETRIEVAL END
-
-
-def tests():
-    controller = DPController()
-    print(
-        f"Controller initialized successfully. Gain matrix K shape: {controller.K.shape}"
-    )
-
-    # Test computation step
-    eta = np.array([0.0, -1.0, 0.0, 0.0, 0.0, 180.0])
-    nu = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    eta_ref = np.zeros(6)
-    print(controller.LQRConditions())
-    tau = controller.compute(0.0, 0.01, eta, nu, eta_ref)
-    print_force_vector_kn(tau)
 
 
 def print_force_vector_kn(vec, precision=2):
@@ -273,6 +253,67 @@ def print_force_vector_kn(vec, precision=2):
         val_str = f"{val:>{precision+8}.{precision}f}"
         print(f"  {label}: {val_str} {unit}")
     print("───────────────────────────")
+
+
+def simulate_error_dynamics(controller, x0: np.ndarray, t_end=200, num_points=1000):
+    """
+    GEMINI MADE THIS
+    Simulation of error dynamics to tune controller
+    """
+
+    # 1. Closed-loop system matrix
+    Acl = controller.A_c - controller.B_c @ controller.K
+
+    # 2. Simulate continuous ODE
+    sol = solve_ivp(lambda t, x: Acl @ x, [0, t_end], x0, dense_output=True)
+
+    # 3. Generate dense arrays for smooth plotting and integration
+    t = np.linspace(0, t_end, num_points)
+    x = sol.sol(t)  # Shape: (6, num_points)
+
+    # 4. Calculate Actuator Usage (u = -Kx)
+    # LQR control law applies a negative feedback gain to the state errors
+    u = -controller.K @ x  # Shape: (3, num_points) -> (tau_x, tau_y, tau_psi)
+
+    # 5. Calculate Performance Metrics (IAE and ISE)
+    # Integrating over time using the trapezoidal rule
+    iae = trapezoid(np.abs(x), t, axis=1)  # Integral Absolute Error
+    ise = trapezoid(x**2, t, axis=1)  # Integral Square Error
+    iae_ts = cumulative_trapezoid(np.abs(x), t, axis=1, initial=0)
+    ise_ts = cumulative_trapezoid(x**2, t, axis=1, initial=0)
+
+    return {
+        "ivp_sol": sol,
+        "time": t,
+        "state_error": x,
+        "actuator_usage": u,
+        "metrics": {
+            "IAE": iae,
+            "ISE": ise,
+            "Cumulative IAE": iae_ts,
+            "Cumulative ISE": ise_ts,
+        },
+    }
+
+
+def tests():
+    controller = DPController()
+    print(
+        f"Controller initialized successfully. Gain matrix K shape: {controller.K.shape}"
+    )
+
+    # Test computation step
+    # eta = np.array([-10.0, 5.0, 0.0, 0.0, 0.0, 5.0])
+    # nu = np.array([1.0, 4.0, 0.0, 0.0, 0.0, 0.0])
+    # eta_ref = np.zeros(6)
+    # tau = controller.compute(0.0, 0.01, eta, nu, eta_ref)
+
+    sol = simulate_error_dynamics(controller)
+
+    # print(controller.LQRConditions())
+    # print(f"Eigenvalues:\n{controller.eigenvalues()}")
+    # print(f"Time constants:\n{1/abs(np.real(controller.eigenvalues()))}")
+    # print_force_vector_kn(tau)
 
 
 def main():
