@@ -46,6 +46,8 @@ own runs but fail the checks.
 """
 
 import numpy as np
+from scipy.linalg import solve_continuous_are
+from simulation.utils import Rz, wrap_angle_pi
 
 
 class DPController:
@@ -76,8 +78,82 @@ class DPController:
         # Return the (6,) desired BODY wrench — fill in tau_d[0] = Fx,
         # tau_d[1] = Fy, tau_d[5] = Mz and leave the rest zero.
 
-        return np.zeros(6)
+        # Get inputs
+        eta3_n = [eta[0], eta[1], eta[5]]  # NED
+        nu3_b = [nu[0], nu[1], nu[5]]  # BODY
 
+        eta3_ref_n = [eta_ref[0], eta_ref[1], eta_ref[5]]  # NED
+        nu3_ref_b = [nu_ref[0], nu_ref[1], nu_ref[5]]  # BODY
+
+        e_N = eta[0] - eta_ref[0]  # Error in N, NED
+        e_E = eta[1] - eta_ref[1]  # Error in E, NED
+        e_psi = wrap_angle_pi(eta[5] - eta_ref[5])  # Heading error psi, NED
+
+        J = Rz(e_psi)
+        e_eta3_n = [e_N, e_E, e_psi]  # Error matrix, NED
+        e_eta3_b = J.T @ e_eta3_n  # Error matrix, BODY
+
+        e_nu3_b = nu3_b - nu3_ref_b  # BODY
+
+        # State vector
+        x_c = np.stack(e_eta3_b.T, e_nu3_b)  # BODY
+
+        # State matrices
+        O3 = np.zeros((3, 3))
+        I3 = np.eye(3)
+
+        A_c = np.block([[O3, I3], [O3, -self.M3_inv @ self.D3]])
+        B_c = np.block([[O3], [self.M3_inv]])
+
+        # Q must be Positive Semi-Definite (Q >= 0)
+        if not self.is_positive_semidefinite(self.Q):
+            raise ValueError(
+                "Matrix Q must be positive semi-definite (Q >= 0). "
+                "Ensure Q is symmetric and all eigenvalues are non-negative."
+            )
+
+        # R must be Positive Definite (R > 0)
+        if not self.is_positive_definite(self.R):
+            raise ValueError(
+                "Matrix R must be strictly positive definite (R > 0). "
+                "Ensure R is symmetric and all eigenvalues are strictly positive."
+            )
+
+        # (A, B) must be Controllable
+        if not self.is_controllable(A_c, B_c):
+            raise ValueError(
+                "The system pair (A, B) is not controllable. "
+                "The rank of the controllability matrix is less than the state dimension."
+            )
+
+        # Solve LQR
+        P = solve_continuous_are(a=A_c, b=B_c, q=self.Q, r=self.R)
+        K = np.linalg.inv(self.R) @ B_c.T @ P
+        u = -K @ x_c
+        return [u[0], u[1], 0, 0, 0, u[5]]
+
+    # TUNING WEIGHTS
+    Q = np.array([[0.25, 0.00, 0.00], [0.00, 0.25, 0.00], [0.00, 0.00, 1.5791367]])
+
+    R = np.array(
+        [
+            [3.90625000e-11, 0.00000000e00, 0.00000000e00],
+            [0.00000000e00, 7.97193878e-11, 0.00000000e00],
+            [0.00000000e00, 0.00000000e00, 4.93151117e-13],
+        ]
+    )
+
+    # CONSTANTS
+    M3 = np.array(
+        [[6.007e5, 0.0, 0.0], [0.0, 7.067e5, -4.733e5], [0.0, -5.712e5, 5.456e7]]
+    )
+
+    D3 = np.array([[1117.6, 0.0, 0.0], [0.0, 2.229e4, 0.0], [0.0, 0.0, 1.95e6]])
+
+    # Compute M3_inv directly to preserve full precision (or use predefined M3_inv)
+    M3_inv = np.linalg.inv(M3)
+
+    # HELPERS
     def is_positive_definite(self, A: np.ndarray, tol: float = 1e-12) -> bool:
         """Checks if A is square, symmetric, and positive definite (all eigenvalues > 0)."""
         # A must be square
@@ -154,6 +230,9 @@ def tests():
     for i in range(3):
         Q[i][i] = 1 / max_xi[i] ** 2
         R[i][i] = 1 / max_ui[i] ** 2
+
+    print(Q)
+    print(R)
 
     # Make the system matrices
     M3 = np.array(
