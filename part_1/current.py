@@ -26,7 +26,13 @@ import numpy as np
 
 
 class Current:
-    """Template for student current model.
+    """Uniform, horizontally-constant ocean current in the NED frame.
+
+    The current is not applied as a force.  The Gunnerus model takes the NED
+    current velocity, rotates it into BODY with ``J(psi).T`` and forms the
+    relative velocity ``nu_r = nu - nu_c_body``, which then drives the damping
+    and Coriolis terms (project text, Sections 3.4 and 3.5).  This class
+    therefore only has to produce the velocity vector itself.
 
     Constructor contract — the automated checks (``python check.py``,
     ``pytest``, ``notebooks/part_1_demo.ipynb``) construct your model with
@@ -49,12 +55,29 @@ class Current:
     def __init__(self, speed: float = 0.0, beta: float = 0.0, *,
                  semantics: str = "towards",
                  beta_end: float | None = None, duration: float = 0.0):
-        # TODO: Store and use the parameters above in step().
+        if semantics not in ("towards", "from"):
+            raise ValueError(
+                f"semantics must be 'towards' or 'from', got {semantics!r}")
         self.speed = float(speed)
         self.beta = float(beta)
         self.semantics = semantics
-        self.beta_end = beta_end
+        self.beta_end = None if beta_end is None else float(beta_end)
         self.duration = float(duration)
+
+        # A 'from' direction is the reverse of the direction the water flows
+        # to, so it is converted to 'towards' by adding pi: "from east"
+        # (beta = pi/2) becomes a westward flow (V_E < 0).
+        self._offset = np.pi if semantics == "from" else 0.0
+
+    def _beta_at(self, t: float) -> float:
+        """Input direction at time ``t``, in the convention of ``semantics``."""
+        if self.beta_end is None:
+            return self.beta
+        if self.duration <= 0.0:
+            return self.beta_end
+        # Linear ramp over `duration`, then held at beta_end (Simulation 2).
+        s = min(max(t / self.duration, 0.0), 1.0)
+        return self.beta + s * (self.beta_end - self.beta)
 
     def step(
         self,
@@ -63,6 +86,9 @@ class Current:
         eta: np.ndarray,
         nu: np.ndarray,
     ) -> np.ndarray:
-        # TODO: Replace this placeholder with your current model.
-        # Default: no current.
-        return np.zeros(6)
+        beta_towards = self._beta_at(t) + self._offset
+
+        nu_c_ned = np.zeros(6)
+        nu_c_ned[0] = self.speed * np.cos(beta_towards)   # V_N
+        nu_c_ned[1] = self.speed * np.sin(beta_towards)   # V_E
+        return nu_c_ned
