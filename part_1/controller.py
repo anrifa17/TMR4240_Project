@@ -104,32 +104,44 @@ class DPController:
         # Return the (6,) desired BODY wrench — fill in tau_d[0] = Fx,
         # tau_d[1] = Fy, tau_d[5] = Mz and leave the rest zero.
 
-        J = Rz(eta[5])  # rotation matrix
+        # --- DEFINITIONS FROM DOCSTRING ---
+        # eta NED
+        N, E, psi = eta[0], eta[1], eta[5]
+
+        # nu BODY
+        u, v, r = nu[0], nu[1], nu[5]
+
+        # eta_ref NED
+        N_d, E_d, psi_d = eta_ref[0], eta_ref[1], eta_ref[5]
+
+        # nu_ref NED
+        Ndot_d, Edot_d, psidot_d = nu_ref[0], nu_ref[1], nu_ref[5]
+
+        J = Rz(psi)  # rotation matrix
 
         # eta
         # --- Nothing to handle here
 
         # nu
-        nu3_b = np.array([nu[0], nu[1], nu[5]])  # BODY, current velocity,
+        # nu3_b = np.array([nu[0], nu[1], nu[5]])  # BODY, current velocity,
+        nu3_b = np.array([u, v, r])  # BODY, current velocity,
         nu3_ref_b = np.zeros_like(nu3_b)  # BODY, reference velocity
 
         if not nu_ref is None:  # if nu_ref is defined
-            nu3_ref_n = np.array(
-                [nu_ref[0], nu_ref[1], nu_ref[5]]
-            )  # NED, reference velocity
+            nu3_ref_n = np.array([Ndot_d, Edot_d, psidot_d])  # NED, reference velocity
             nu3_ref_b = J.T @ nu3_ref_n  # BODY, update reference velocity
 
         # state errors
-        e_N = eta[0] - eta_ref[0]  # NED, error in N
-        e_E = eta[1] - eta_ref[1]  # NED, error in E
-        e_psi = wrap_angle_pi(eta[5] - eta_ref[5])  # NED, heading error psi
+        e_N = N - N_d  # NED, error in N
+        e_E = E - E_d  # NED, error in E
+        e_psi = wrap_angle_pi(psi - psi_d)  # NED, heading error psi
 
         e_eta3_n = np.array([e_N, e_E, e_psi])  # NED, error matrix position
         e_eta3_b = J.T @ e_eta3_n  #  BODY, error matrix position
         e_nu3_b = nu3_b - nu3_ref_b  # BODY, error matrix velocity
 
         # State vector
-        x_c = np.hstack((e_eta3_b.T, e_nu3_b))  # BODY, state vector
+        x_c = np.hstack((e_eta3_b.T, e_nu3_b.T))  # BODY, state vector
 
         # Q must be Positive Semi-Definite (Q >= 0)
         if not self.is_positive_semidefinite(self.Q):
@@ -308,12 +320,29 @@ def tests():
     # eta_ref = np.zeros(6)
     # tau = controller.compute(0.0, 0.01, eta, nu, eta_ref)
 
-    sol = simulate_error_dynamics(controller)
+    # sol = simulate_error_dynamics(controller)
 
     # print(controller.LQRConditions())
     # print(f"Eigenvalues:\n{controller.eigenvalues()}")
     # print(f"Time constants:\n{1/abs(np.real(controller.eigenvalues()))}")
     # print_force_vector_kn(tau)
+
+    controller = DPController()
+
+    x0_surge = 0  # m
+    x0_sway = -20  # m
+    x0_yaw = 0 * np.pi / 180  # rad
+    x0_vel_surge = 0  # m/s
+    x0_vel_sway = 0  # m/s
+    x0_vel_yaw = 0 * np.pi / 180  # rad/s
+
+    x0 = np.array([x0_surge, x0_sway, x0_yaw, x0_vel_surge, x0_vel_sway, x0_vel_yaw])
+
+    # --- Usage ---
+    # print(f"IAE for Position X: {results['metrics']['IAE'][0]:.2f}")
+    # print(f"ISE for Position Y: {results['metrics']['ISE'][1]:.2f}")
+    # 1. Run simulation
+    results = simulate_error_dynamics(controller, x0, t_end=40)
 
 
 def main():
