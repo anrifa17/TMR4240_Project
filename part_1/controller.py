@@ -65,9 +65,7 @@ class DPController:
         self.M3 = np.array(
             [[6.007e5, 0.0, 0.0], [0.0, 7.067e5, -4.733e5], [0.0, -5.712e5, 5.456e7]]
         )
-        self.D3 = np.array(
-            [[1117.6, 0.0, 0.0], [0.0, 2.229e4, 0.0], [0.0, 0.0, 1.95e6]]
-        )
+        self.D3 = np.array([[1117.6, 0.0, 0.0], [0.0, 2.229e4, 0.0], [0.0, 0.0, 1.95e6]])
         self.M3_inv = np.linalg.inv(self.M3)
 
         # State-space matrices
@@ -82,9 +80,30 @@ class DPController:
 
         # R penalizes actuator usage
         default_R = np.diag([3.90625000e-11, 7.97193878e-11, 4.93151117e-13])
-        
-        self.Q = kwargs.get('Q', default_Q)
-        self.R = kwargs.get('R', default_R)
+
+        self.Q = kwargs.get("Q", default_Q)
+        self.R = kwargs.get("R", default_R)
+
+        # Q must be Positive Semi-Definite (Q >= 0)
+        if not self.is_positive_semidefinite(self.Q):
+            raise ValueError(
+                "Matrix Q must be positive semi-definite (Q >= 0). "
+                "Ensure Q is symmetric and all eigenvalues are non-negative."
+            )
+
+        # R must be Positive Definite (R > 0)
+        if not self.is_positive_definite(self.R):
+            raise ValueError(
+                "Matrix R must be positive definite (R > 0). "
+                "Ensure R is symmetric and all eigenvalues are strictly positive."
+            )
+
+        # (A, B) must be Controllable
+        if not self.is_controllable(self.A_c, self.B_c):
+            raise ValueError(
+                "The system pair (A, B) is not controllable. "
+                "The rank of the controllability matrix is less than the state dimension."
+            )
 
         # Gain matrix K
         P = solve_continuous_are(a=self.A_c, b=self.B_c, q=self.Q, r=self.R)
@@ -92,6 +111,9 @@ class DPController:
 
     def reset(self) -> None:
         """Optional: reset internal states (integrators, filters) before a run."""
+        pass
+
+    def apply_external_aw(tau_applied, psi, dt):
         pass
 
     def compute(
@@ -109,16 +131,19 @@ class DPController:
 
         # --- DEFINITIONS FROM DOCSTRING ---
         # eta NED
-        N, E, psi = eta[0], eta[1], eta[5]
+        N, E, psi = eta[0], eta[1], eta[5]  # NED
 
         # nu BODY
-        u, v, r = nu[0], nu[1], nu[5]
+        u, v, r = nu[0], nu[1], nu[5]  # BODY
 
         # eta_ref NED
-        N_d, E_d, psi_d = eta_ref[0], eta_ref[1], eta_ref[5]
+        N_d, E_d, psi_d = eta_ref[0], eta_ref[1], eta_ref[5]  # NED
 
         # nu_ref NED
-        Ndot_d, Edot_d, psidot_d = nu_ref[0], nu_ref[1], nu_ref[5]
+        Ndot_d, Edot_d, psidot_d = 0, 0, 0  # NED
+
+        # acc_ref NED
+        Nddot_d, Eddot_d, psiddot_d = 0, 0, 0  # NED
 
         J = Rz(psi)  # rotation matrix
 
@@ -126,13 +151,29 @@ class DPController:
         # --- Nothing to handle here
 
         # nu
-        # nu3_b = np.array([nu[0], nu[1], nu[5]])  # BODY, current velocity,
         nu3_b = np.array([u, v, r])  # BODY, current velocity,
         nu3_ref_b = np.zeros_like(nu3_b)  # BODY, reference velocity
 
         if not nu_ref is None:  # if nu_ref is defined
+            Ndot_d, Edot_d, psidot_d = (
+                nu_ref[0],
+                nu_ref[1],
+                nu_ref[5],
+            )  # NED, reference velocity
             nu3_ref_n = np.array([Ndot_d, Edot_d, psidot_d])  # NED, reference velocity
-            nu3_ref_b = J.T @ nu3_ref_n  # BODY, update reference velocity
+            nu3_ref_b = J.T @ nu3_ref_n  # BODY, reference velocity
+
+        # accleration / inertia feedforward
+        tau_ff = np.zeros_like(nu3_b)
+        if not acc_ref is None:  # if acc_ref is defined
+            Nddot_d, Eddot_d, psiddot_d = (
+                acc_ref[0],
+                acc_ref[1],
+                acc_ref[5],
+            )  # NED, reference accelarion
+            acc3_ref_n = np.array([Nddot_d, Eddot_d, psiddot_d])  # NED, reference acceleration
+            acc3_ref_b = J.T @ acc3_ref_n  # BODY, reference acceleration
+            tau_ff = self.M3 @ acc3_ref_b.T  # BODY, feedforward wrench
 
         # state errors
         e_N = N - N_d  # NED, error in N
@@ -146,29 +187,19 @@ class DPController:
         # State vector
         x_c = np.hstack((e_eta3_b.T, e_nu3_b.T))  # BODY, state vector
 
-        # Q must be Positive Semi-Definite (Q >= 0)
-        if not self.is_positive_semidefinite(self.Q):
-            raise ValueError(
-                "Matrix Q must be positive semi-definite (Q >= 0). "
-                "Ensure Q is symmetric and all eigenvalues are non-negative."
-            )
+        # Feedback wrench
+        tau_fb = -self.K @ x_c
 
-        # R must be Positive Definite (R > 0)
-        if not self.is_positive_definite(self.R):
-            raise ValueError(
-                "Matrix R must be strictly positive definite (R > 0). "
-                "Ensure R is symmetric and all eigenvalues are strictly positive."
-            )
+        # Total wrench
+        tau_total = tau_fb + tau_ff
 
-        # (A, B) must be Controllable
-        if not self.is_controllable(self.A_c, self.B_c):
-            raise ValueError(
-                "The system pair (A, B) is not controllable. "
-                "The rank of the controllability matrix is less than the state dimension."
-            )
+        # Desired 6x6 wrench
+        tau_d = np.zeros(6)
+        tau_d[0] = tau_total[0]
+        tau_d[1] = tau_total[1]
+        tau_d[5] = tau_total[2]
 
-        u = -self.K @ x_c
-        return [u[0], u[1], 0, 0, 0, u[2]]
+        return tau_d
 
     # HELPERS START
     def is_positive_definite(self, A: np.ndarray, tol: float = 1e-12) -> bool:
@@ -186,9 +217,7 @@ class DPController:
         # All eigenvalues must be strictly > 0 (with tolerance for floating-point noise)
         eigvals = np.linalg.eigvalsh(A)
         if not np.all(eigvals > 0):
-            print(
-                f"Not all eigenvalues are > 0 (Min eigenvalue: {np.min(eigvals):.3e})"
-            )
+            print(f"Not all eigenvalues are > 0 (Min eigenvalue: {np.min(eigvals):.3e})")
             return False
 
         return True
@@ -208,9 +237,7 @@ class DPController:
         # All eigenvalues must be >= 0 (allowing for minor negative numerical noise down to -tol)
         eigvals = np.linalg.eigvalsh(A)
         if not np.all(eigvals >= -tol):
-            print(
-                f"Not all eigenvalues are >= 0 (Min eigenvalue: {np.min(eigvals):.3e})"
-            )
+            print(f"Not all eigenvalues are >= 0 (Min eigenvalue: {np.min(eigvals):.3e})")
             return False
 
         return True
@@ -313,9 +340,7 @@ def simulate_error_dynamics(controller, x0: np.ndarray, t_end=200, num_points=10
 
 def tests():
     controller = DPController()
-    print(
-        f"Controller initialized successfully. Gain matrix K shape: {controller.K.shape}"
-    )
+    print(f"Controller initialized successfully. Gain matrix K shape: {controller.K.shape}")
 
     # Test computation step
     # eta = np.array([-10.0, 5.0, 0.0, 0.0, 0.0, 5.0])
