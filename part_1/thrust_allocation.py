@@ -1,18 +1,17 @@
 """
 Thrust Allocation - unweighted pseudo-inverse.
 
-Solves B_e z = tau_c (eq. 41) for the decision vector
+Solves B_e z = tau_c for the decision vector
 z = [u_T, Fx_1, Fy_1, Fx_2, Fy_2]^T (eq. 40) using the Moore-Penrose
-pseudo-inverse and recovers the per-thruster commands with eq. 42.
+pseudo-inverse and recovers the per-thruster commands
 
-Design choices (see report Sec. X):
+Design choices:
   * Saturation: uniform scaling of tau_c preserves the wrench direction.
   * Angle ambiguity: for each azimuth we pick between (alpha, +u) and
     (alpha + pi, -u) the representation nearest alpha_now.
   * Small-thrust hold: below u_min the azimuth angle is held at alpha_now
     so the commanded angle does not chatter when the demand is ~0.
 
-The report calls the thrust magnitude u_j; the template also names it u.
 Signed thrust is returned; the tunnel is always driven at alpha = pi/2.
 """
 from typing import List, Optional, Tuple
