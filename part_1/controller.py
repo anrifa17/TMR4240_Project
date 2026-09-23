@@ -98,6 +98,9 @@ class DPController:
         self.Ti = kwargs.get("Ti", default_Ti)
         self.Ki = kwargs.get("Ki", Kp / self.Ti)
 
+        # Anti-windup gain
+        self.Kaw = kwargs.get("Kaw", self.Ki)
+
         # Runtime values
         self.xi = np.zeros(3)
         self._last_tau_d3 = np.zeros(3)
@@ -107,10 +110,10 @@ class DPController:
         self.xi = np.zeros(3)
         self._last_tau_d3 = np.zeros(3)
 
-    def apply_external_aw(tau_applied, psi, dt):
-        K_aw = 1
-
-        pass
+    def apply_external_aw(self, tau_applied, psi, dt):
+        tau_applied3 = np.array([tau_applied[0], tau_applied[1], tau_applied[5]])
+        residual = tau_applied3 - self._last_tau_d3  # 0 if nothing saturated
+        self.xi = self.xi + dt * (self.Kaw @ residual)
 
     def compute(
         self,
@@ -203,10 +206,10 @@ class DPController:
         self.tau_d[0] = tau_total[0]
         self.tau_d[1] = tau_total[1]
         self.tau_d[5] = tau_total[2]
-        
+
         return self.tau_d
 
-    # HELPERS START
+    # HELPERS ---------------------------------------------------
     def is_positive_definite(self, A: np.ndarray, tol: float = 1e-12) -> bool:
         """Checks if A is square, symmetric, and positive definite (all eigenvalues > 0)."""
         # A must be square
@@ -267,9 +270,6 @@ class DPController:
 
         return rank == n
 
-    # HELPERS END
-
-    # INFORMATION RETRIEVAL START
     def LQRConditions(self) -> str:
         """Returns LQR conditions status"""
         s = ""
@@ -282,7 +282,14 @@ class DPController:
         """Returns closed-loop eigenvalues of the LQR controller"""
         return np.linalg.eigvals(self.A_c - self.B_c @ self.K)
 
-    # INFORMATION RETRIEVAL END
+    # VERIFICATION: since Ki is hand-picked, not ARE-derived, always check
+    # the resulting augmented closed-loop system is actually stable.
+    def augmented_eigenvalues(self):
+        C = np.hstack([np.eye(3), np.zeros((3, 3))])
+        A_aug = np.block([[np.zeros((3, 3)), C], [np.zeros((6, 3)), self.A_c]])
+        B_aug = np.block([[np.zeros((3, 3))], [self.B_c]])
+        K_full = np.hstack([self.Ki, self.K])  # (3,9): [xi-gain, x_c-gain]
+        return np.linalg.eigvals(A_aug - B_aug @ K_full)
 
 
 def print_force_vector_kn(vec, precision=2):
