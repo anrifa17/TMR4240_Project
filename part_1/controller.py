@@ -78,10 +78,13 @@ class DPController:
 
         # Tuning weights
         ## Q matrix penalizes position (0:3) and velocity (3:6) errors
-        self.Q = np.diag([0.04, 0.04, 131.31, 4, 4, 100])
+        default_Q = np.diag([0.04, 0.04, 131.31, 4, 4, 100])
 
         # R penalizes actuator usage
-        self.R = np.diag([3.90625000e-11, 7.97193878e-11, 4.93151117e-13])
+        default_R = np.diag([3.90625000e-11, 7.97193878e-11, 4.93151117e-13])
+        
+        self.Q = kwargs.get('Q', default_Q)
+        self.R = kwargs.get('R', default_R)
 
         # Gain matrix K
         P = solve_continuous_are(a=self.A_c, b=self.B_c, q=self.Q, r=self.R)
