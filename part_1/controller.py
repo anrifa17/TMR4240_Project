@@ -74,46 +74,42 @@ class DPController:
         self.A_c = np.block([[O3, I3], [O3, -self.M3_inv @ self.D3]])
         self.B_c = np.block([[O3], [self.M3_inv]])
 
-        # Tuning weights
-        ## Q matrix penalizes position (0:3) and velocity (3:6) errors
+        # LQR weights
         default_Q = np.diag([0.04, 0.04, 131.31, 4, 4, 100])
-
-        # R penalizes actuator usage
         default_R = np.diag([3.90625000e-11, 7.97193878e-11, 4.93151117e-13])
-
         self.Q = kwargs.get("Q", default_Q)
         self.R = kwargs.get("R", default_R)
 
-        # Q must be Positive Semi-Definite (Q >= 0)
+        # Check conditions for LQR solution
         if not self.is_positive_semidefinite(self.Q):
-            raise ValueError(
-                "Matrix Q must be positive semi-definite (Q >= 0). "
-                "Ensure Q is symmetric and all eigenvalues are non-negative."
-            )
-
-        # R must be Positive Definite (R > 0)
+            raise ValueError("Q must be positive semi-definite.")
         if not self.is_positive_definite(self.R):
-            raise ValueError(
-                "Matrix R must be positive definite (R > 0). "
-                "Ensure R is symmetric and all eigenvalues are strictly positive."
-            )
-
-        # (A, B) must be Controllable
+            raise ValueError("R must be positive definite.")
         if not self.is_controllable(self.A_c, self.B_c):
-            raise ValueError(
-                "The system pair (A, B) is not controllable. "
-                "The rank of the controllability matrix is less than the state dimension."
-            )
+            raise ValueError("(A, B) is not controllable.")
 
         # Gain matrix K
         P = solve_continuous_are(a=self.A_c, b=self.B_c, q=self.Q, r=self.R)
         self.K = np.linalg.inv(self.R) @ self.B_c.T @ P
 
+        # Steady-state correction
+        Kp = self.K[:, 0:3]
+        default_Ti = 5 * 1 / max(abs(np.real(self.LQR_cl_eigenvalues())))  # seconds
+        self.Ti = kwargs.get("Ti", default_Ti)
+        self.Ki = kwargs.get("Ki", Kp / self.Ti)
+
+        # Runtime values
+        self.xi = np.zeros(3)
+        self._last_tau_d3 = np.zeros(3)
+
     def reset(self) -> None:
         """Optional: reset internal states (integrators, filters) before a run."""
-        pass
+        self.xi = np.zeros(3)
+        self._last_tau_d3 = np.zeros(3)
 
     def apply_external_aw(tau_applied, psi, dt):
+        K_aw = 1
+
         pass
 
     def compute(
@@ -154,7 +150,7 @@ class DPController:
         nu3_b = np.array([u, v, r])  # BODY, current velocity,
         nu3_ref_b = np.zeros_like(nu3_b)  # BODY, reference velocity
 
-        if not nu_ref is None:  # if nu_ref is defined
+        if nu_ref is not None:  # if nu_ref is defined
             Ndot_d, Edot_d, psidot_d = (
                 nu_ref[0],
                 nu_ref[1],
@@ -162,18 +158,6 @@ class DPController:
             )  # NED, reference velocity
             nu3_ref_n = np.array([Ndot_d, Edot_d, psidot_d])  # NED, reference velocity
             nu3_ref_b = J.T @ nu3_ref_n  # BODY, reference velocity
-
-        # accleration / inertia feedforward
-        tau_ff = np.zeros_like(nu3_b)
-        if not acc_ref is None:  # if acc_ref is defined
-            Nddot_d, Eddot_d, psiddot_d = (
-                acc_ref[0],
-                acc_ref[1],
-                acc_ref[5],
-            )  # NED, reference accelarion
-            acc3_ref_n = np.array([Nddot_d, Eddot_d, psiddot_d])  # NED, reference acceleration
-            acc3_ref_b = J.T @ acc3_ref_n  # BODY, reference acceleration
-            tau_ff = self.M3 @ acc3_ref_b.T  # BODY, feedforward wrench
 
         # state errors
         e_N = N - N_d  # NED, error in N
@@ -187,19 +171,40 @@ class DPController:
         # State vector
         x_c = np.hstack((e_eta3_b.T, e_nu3_b.T))  # BODY, state vector
 
+        # integral steady-state correction
+        self.xi = self.xi + dt * e_eta3_b
+
+        # inertia feedforward
+        tau_ff = np.zeros_like(nu3_b)
+        if acc_ref is not None:  # if acc_ref is defined
+            Nddot_d, Eddot_d, psiddot_d = (
+                acc_ref[0],
+                acc_ref[1],
+                acc_ref[5],
+            )  # NED, reference accelarion
+            acc3_ref_n = np.array([Nddot_d, Eddot_d, psiddot_d])  # NED, reference acceleration
+            acc3_ref_b = J.T @ acc3_ref_n  # BODY, reference acceleration
+            tau_ff = self.M3 @ acc3_ref_b.T  # BODY, feedforward wrench
+
+        # Intertia wrench
+        tau_i = -self.Ki @ self.xi
+
         # Feedback wrench
         tau_fb = -self.K @ x_c
 
         # Total wrench
-        tau_total = tau_fb + tau_ff
+        tau_total = tau_fb + tau_i + tau_ff
+
+        # Save desired 3DOF wrench, BODY
+        self._last_tau_d3 = tau_total.copy()
 
         # Desired 6x6 wrench
-        tau_d = np.zeros(6)
-        tau_d[0] = tau_total[0]
-        tau_d[1] = tau_total[1]
-        tau_d[5] = tau_total[2]
-
-        return tau_d
+        self.tau_d = np.zeros(6)
+        self.tau_d[0] = tau_total[0]
+        self.tau_d[1] = tau_total[1]
+        self.tau_d[5] = tau_total[2]
+        
+        return self.tau_d
 
     # HELPERS START
     def is_positive_definite(self, A: np.ndarray, tol: float = 1e-12) -> bool:
@@ -273,7 +278,8 @@ class DPController:
         s += f"(A,B) is {'NOT ' if not self.is_controllable(self.A_c, self.B_c) else ''}controllable"
         return s
 
-    def eigenvalues(self):
+    def LQR_cl_eigenvalues(self):
+        """Returns closed-loop eigenvalues of the LQR controller"""
         return np.linalg.eigvals(self.A_c - self.B_c @ self.K)
 
     # INFORMATION RETRIEVAL END
