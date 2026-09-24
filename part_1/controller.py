@@ -62,9 +62,7 @@ class DPController:
 
     def __init__(self, *args, **kwargs):
         # Physical 3-DOF matrices
-        self.M3 = np.array(
-            [[6.007e5, 0.0, 0.0], [0.0, 7.067e5, -4.733e5], [0.0, -5.712e5, 5.456e7]]
-        )
+        self.M3 = np.array([[6.007e5, 0.0, 0.0], [0.0, 7.067e5, -4.733e5], [0.0, -5.712e5, 5.456e7]])
         self.D3 = np.array([[1117.6, 0.0, 0.0], [0.0, 2.229e4, 0.0], [0.0, 0.0, 1.95e6]])
         self.M3_inv = np.linalg.inv(self.M3)
 
@@ -75,8 +73,8 @@ class DPController:
         self.B_c = np.block([[O3], [self.M3_inv]])
 
         # LQR weights
-        default_Q = np.diag([0.04, 0.04, 131.31, 4, 4, 100])
-        default_R = np.diag([3.90625000e-11, 7.97193878e-11, 4.93151117e-13])
+        default_Q = np.diag([0.04, 0.04, 131.31, 4, 4, 100 * 5])
+        default_R = np.diag([3.90625000e-11 * 6, 7.97193878e-11 * 3, 4.93151117e-13 * 12])
         self.Q = kwargs.get("Q", default_Q)
         self.R = kwargs.get("R", default_R)
 
@@ -94,7 +92,7 @@ class DPController:
 
         # Steady-state correction
         Kp = self.K[:, 0:3]
-        default_Ti = 5 * 1 / max(abs(np.real(self.LQR_cl_eigenvalues())))  # seconds
+        default_Ti = 5 * 1 / min(abs(np.real(self.LQR_cl_eigenvalues())))  # seconds
         self.Ti = kwargs.get("Ti", default_Ti)
         self.Ki = kwargs.get("Ki", Kp / self.Ti)
 
@@ -112,8 +110,7 @@ class DPController:
 
     def apply_external_aw(self, tau_applied, psi, dt):
         tau_applied3 = np.array([tau_applied[0], tau_applied[1], tau_applied[5]])
-        residual = tau_applied3 - self._last_tau_d3  # 0 if nothing saturated
-        self.xi = self.xi + dt * (self.Kaw @ residual)
+        self.xi = self.xi + dt * (self.Kaw @ (tau_applied3 - self._last_tau_d3))  # taus may have to be swapped
 
     def compute(
         self,
@@ -187,7 +184,7 @@ class DPController:
             )  # NED, reference accelarion
             acc3_ref_n = np.array([Nddot_d, Eddot_d, psiddot_d])  # NED, reference acceleration
             acc3_ref_b = J.T @ acc3_ref_n  # BODY, reference acceleration
-            tau_ff = self.M3 @ acc3_ref_b.T  # BODY, feedforward wrench
+            tau_ff = self.M3 @ acc3_ref_b  # BODY, feedforward wrench
 
         # Intertia wrench
         tau_i = -self.Ki @ self.xi
@@ -295,6 +292,7 @@ class DPController:
 def print_force_vector_kn(vec, precision=2):
     """
     GEMINI made this
+
     Formats and prints a 6-DOF force/moment vector converted to kN and kN·m.
     """
     labels = ["Fx", "Fy", "Fz", "Mx", "My", "Mz"]
