@@ -96,8 +96,8 @@ class DPController:
         self.Ti = kwargs.get("Ti", default_Ti)
         self.Ki = kwargs.get("Ki", Kp / self.Ti)
 
-        # Anti-windup gain
-        self.Kaw = kwargs.get("Kaw", self.Ki)
+        # Anti-windup 
+        self.T_aw = kwargs.get("T_aw", 10.0)
 
         # Runtime values
         self.xi = np.zeros(3)
@@ -110,7 +110,9 @@ class DPController:
 
     def apply_external_aw(self, tau_applied, psi, dt):
         tau_applied3 = np.array([tau_applied[0], tau_applied[1], tau_applied[5]])
-        self.xi = self.xi + dt * (self.Kaw @ (tau_applied3 - self._last_tau_d3))  # taus may have to be swapped
+        # Back-calculation: tau_i = -Ki xi, so pulling tau_i towards the applied wrench
+        # needs xi_dot = -Ki^-1 (tau_applied - tau_d) / T_aw
+        self.xi = self.xi - dt / self.T_aw * np.linalg.solve(self.Ki, tau_applied3 - self._last_tau_d3)
 
     def compute(
         self,
