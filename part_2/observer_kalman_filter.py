@@ -77,10 +77,12 @@ class KalmanFilterObserver(Observer):
         self.Qc = np.diag(np.concatenate([self.q_w, self.q_b]))  # 6x6 diagonal [Q_w, Q_b]
 
         # ======== Fixed parameters ========
+        self.idx = [0, 1, 5]
+
         # Vessel model
         self.M = np.array([[6.007e5, 0.0, 0.0], [0.0, 7.067e5, -4.733e5], [0.0, -5.712e5, 5.456e7]])
         self.D = np.array([[1117.6, 0.0, 0.0], [0.0, 2.229e4, 0.0], [0.0, 0.0, 1.95e6]])
-        self.M_inv = np.linalg.inv(self.M3)
+        self.M_inv = np.linalg.inv(self.M)
 
         # Wave model
         omega = 0.628 * np.ones(3)  # dominant wave frequency [rad/s]
@@ -155,10 +157,10 @@ class KalmanFilterObserver(Observer):
         F = np.zeros((15, 15))
         F[0:6, 0:6] = self.Aw
         F[6:9, 8] = self._dJ(psi) @ nu  # d(J nu)/d psi (only psi column)
-        F[6:9, 12:15] = self.Rz(psi)
+        F[6:9, 12:15] = Rz(psi)
         F[9:12, 9:12] = -self.Tb_inv
         F[12:15, 8] = self.M_inv @ (self._dJ(psi).T @ b)  # d(J^T b)/d psi
-        F[12:15, 9:12] = self.M_inv @ self.Rz(psi).T
+        F[12:15, 9:12] = self.M_inv @ Rz(psi).T
         F[12:15, 12:15] = -self.M_inv @ self.D
         return F
 
