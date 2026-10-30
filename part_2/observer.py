@@ -28,6 +28,7 @@ import numpy as np
 
 from simulation.utils import Rz, wrap_angle_pi
 
+
 @dataclass
 class ObserverEstimate:
     eta: np.ndarray
@@ -123,20 +124,20 @@ class NonlinearPassiveObserver(Observer):
         Tb = 1000.0
         self.Tb_inv = (1.0 / Tb) * np.eye(3)
 
-        # K3 = M · K3_bar
         # trying this values
-        K3_bar = np.diag([1e-4, 1e-4, 5e-6])  # positive diagonal (passivity condition)
-        self.K3 = self.M @ K3_bar  # passivity condition satisfied: K3 = M · K3_bar
-
-        self.K2 = np.diag([0.5, 0.5, 0.1])  # position/heading correction gain
-
-        self.K4 = np.diag([0.01, 0.01, 0.001])  # bias correction gain
-
         # K1: wavestate correction
         self.K1 = np.zeros((6, 3))
-        self.K1[1, 0] = 1.0  # xi2_surge
-        self.K1[3, 1] = 1.0  # xi2_sway
-        self.K1[5, 2] = 0.5  # xi2_yaw
+        self.K1[1, 0] = 1e-3  # xi2_surge
+        self.K1[3, 1] = 1e-3 # xi2_sway
+        self.K1[5, 2] = 1e-5 # xi2_yaw
+
+        self.K2 = np.diag([0.09, 0.09, 0.09])  # position/heading correction gain
+
+        # K3 = M · K3_bar
+        K3_bar = np.diag([2.7e-3, 2.7e-3, 2.7e-3])  # positive diagonal (passivity condition)
+        self.K3 = self.M @ K3_bar  # passivity condition satisfied: K3 = M · K3_bar
+
+        self.K4 = np.diag([16, 16, 1.5e3])  # bias correction gain
 
         # states
         self.xi_hat = np.zeros(6)
