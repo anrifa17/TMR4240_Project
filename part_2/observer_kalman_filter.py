@@ -67,6 +67,16 @@ class KalmanFilterObserver(Observer):
     name = "kalman"
 
     def __init__(self, *args, **kwargs):
+
+        # ======== Tunable parameters ========
+        # q_w: wave noise intensity [surge, sway, yaw]. 1 = expected wave intensity.
+        # q_b: bias noise intensity [N^2/s, N^2/s, (Nm)^2/s]. Start: 2*sigma_b^2/T_b.
+        # Continuous-time intensities; converted to per-sample Q = Qc/dt inside step().
+        self.q_w = (1.0, 1.0, 1.0)
+        self.q_b = (3.2e6, 3.2e6, 12.8e6)
+        self.Qc = np.diag(np.concatenate([self.q_w, self.q_b]))  # 6x6 diagonal [Q_w, Q_b]
+
+        # ======== Fixed parameters ========
         # Vessel model
         self.M = np.array([[6.007e5, 0.0, 0.0], [0.0, 7.067e5, -4.733e5], [0.0, -5.712e5, 5.456e7]])
         self.D = np.array([[1117.6, 0.0, 0.0], [0.0, 2.229e4, 0.0], [0.0, 0.0, 1.95e6]])
@@ -99,7 +109,6 @@ class KalmanFilterObserver(Observer):
         # Covariances
         sigma_b = np.array([40e3, 40e3, 80e3])  # bias std [N, N, Nm]
         # Continuous-time intensities Qc; converted to per-sample Q = Qc/dt inside step()
-        self.Qc = np.diag(np.concatenate([np.ones(3), 2.0 * sigma_b**2 / Tb]))
         self.R = np.diag([0.2**2, 0.2**2, np.deg2rad(0.20) ** 2])
 
         sigma_nu = np.array([0.3, 0.3, 0.3])  # initial velocity std
@@ -117,10 +126,88 @@ class KalmanFilterObserver(Observer):
 
         self.reset()
 
-    def step(self, t, dt, eta_measured, tau_est):
-        idx = [0, 1, 5]
+    def reset(self, eta0=None):
+        self.x_bar = np.zeros(15)
+        self.P_bar = self.P0.copy()
+        self.need_init = eta0 is None  # if no true pose is given, use the first measurement
+        if eta0 is not None:
+            self.x_bar[6:9] = np.asarray(eta0, dtype=float)[self.idx]
 
-        return self._placeholder(eta_measured)
+    @staticmethod
+    def _dJ(psi):
+        c, s = np.cos(psi), np.sin(psi)
+        return np.array([[-s, -c, 0.0], [c, -s, 0.0], [0.0, 0.0, 0.0]])
+
+    def _f(self, x, u):
+        """Continuous dynamics f(x) + B u."""
+        xi, psi, b, nu = x[0:6], x[8], x[9:12], x[12:15]
+        J = Rz(psi)
+        xdot = np.zeros(15)
+        xdot[0:6] = self.Aw @ xi
+        xdot[6:9] = J @ nu
+        xdot[9:12] = -self.Tb_inv @ b
+        xdot[12:15] = self.M_inv @ (-self.D @ nu + J.T @ b + u)
+        return xdot
+
+    def _jacobian(self, x):
+        """F = d(f + B u)/dx evaluated at x (the matrix G in the report)."""
+        psi, b, nu = x[8], x[9:12], x[12:15]
+        F = np.zeros((15, 15))
+        F[0:6, 0:6] = self.Aw
+        F[6:9, 8] = self._dJ(psi) @ nu  # d(J nu)/d psi (only psi column)
+        F[6:9, 12:15] = self.Rz(psi)
+        F[9:12, 9:12] = -self.Tb_inv
+        F[12:15, 8] = self.M_inv @ (self._dJ(psi).T @ b)  # d(J^T b)/d psi
+        F[12:15, 9:12] = self.M_inv @ self.Rz(psi).T
+        F[12:15, 12:15] = -self.M_inv @ self.D
+        return F
+
+    def step(self, t, dt, eta_measured, tau_est):
+        idx = self.idx
+        eta_measured = np.asarray(eta_measured, dtype=float)
+        y = eta_measured[idx]  # [N, E, psi]; list indexing picks 3 entries
+        u = np.asarray(tau_est, dtype=float)[idx]  # [tau_x, tau_y, tau_psi]
+
+        if self.need_init:  # no reset(eta0) given: start at first measurement
+            self.x_bar[6:9] = y
+            self.need_init = False
+
+        x, P = self.x_bar, self.P_bar
+
+        # Corrector
+        innov = y - self.H @ x
+        innov[2] = wrap_angle_pi(innov[2])  # wrap heading innovation
+        S = self.H @ P @ self.H.T + self.R
+        # K = P H^T S^-1 computed as (S^-1 H P)^T, since S and P are symmetric (no explicit inverse)
+        K = np.linalg.solve(S, self.H @ P).T
+        x_hat = x + K @ innov
+        x_hat[8] = wrap_angle_pi(x_hat[8])  # wrap heading state
+        I_KH = np.eye(15) - K @ self.H
+        P_hat = I_KH @ P @ I_KH.T + K @ self.R @ K.T  # Joseph form
+        P_hat = 0.5 * (P_hat + P_hat.T)  # keep P exactly symmetric
+
+        # Output (6-DOF)
+        eta_out = eta_measured.copy()  # z, phi, theta passed through from measurement
+        eta_out[idx] = x_hat[6:9]  # LF pose (wave part excluded)
+        nu_out = np.zeros(6)
+        nu_out[idx] = x_hat[12:15]
+        bias_out = np.zeros(6)
+        bias_out[idx] = x_hat[9:12]
+
+        # Predictor
+        if dt > 0.0:
+            F = self._jacobian(x_hat)
+            Phi = np.eye(15) + dt * F
+            Gamma = dt * self.E
+            Q = self.Qc / dt  # per-sample covariance
+            self.P_bar = Phi @ P_hat @ Phi.T + Gamma @ Q @ Gamma.T
+            self.P_bar = 0.5 * (self.P_bar + self.P_bar.T)
+            self.x_bar = x_hat + dt * self._f(x_hat, u)
+            self.x_bar[8] = wrap_angle_pi(self.x_bar[8])
+        else:
+            self.x_bar, self.P_bar = x_hat, P_hat
+
+        return ObserverEstimate(eta=eta_out, nu=nu_out, bias=bias_out)
 
 
 def select_observer(kind: str, **kwargs) -> Observer:
