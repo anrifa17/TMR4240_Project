@@ -77,6 +77,14 @@ def load_wind_coefficients() -> Tuple[np.ndarray, np.ndarray]:
     return table[:, 0], table[:, 1:]
 
 
+def norsok_spectrum(f: np.ndarray, U10: float, z: float = 10.0) -> np.ndarray:
+    """NORSOK wind spectrum S(f) [m^2/s^2/Hz], f in Hz (Sorensen 2018, eq. 6.31)."""
+    n = 0.468
+    x = 172.0 * f * (z / 10.0) ** (2.0 / 3.0) * (U10 / 10.0) ** (-0.75)
+    return (320.0 * (U10 / 10.0) ** 2 * (z / 10.0) ** 0.45
+            / (1.0 + x ** n) ** (5.0 / (3.0 * n)))
+
+
 class Wind:
     """Template for the Part 2 wind model.
 
@@ -120,7 +128,9 @@ class Wind:
                  gust_params: Dict | None = None, sigma_dir: float = 0.0,
                  tau_dir: float = 300.0, dir_limit: float = np.deg2rad(5.0),
                  seed: int | None = None):
-        # TODO: Store and use the parameters above in step().
+        if semantics not in ("towards", "from"):
+            raise ValueError(
+                f"semantics must be 'towards' or 'from', got {semantics!r}")
         self.mean_speed = float(mean_speed)
         self.beta = float(beta)
         self.semantics = semantics
@@ -133,6 +143,41 @@ class Wind:
         self.dir_limit = float(dir_limit)
         self.seed = seed
 
+        # Mean direction converted to 'towards' (as in Part 1).
+        offset = np.pi if semantics == "from" else 0.0
+        self._beta_towards = float(np.arctan2(np.sin(self.beta + offset),
+                                              np.cos(self.beta + offset)))
+        self._alpha_deg, self._C6 = load_wind_coefficients()
+
+        # One random stream per stochastic component, so switching the gust
+        # on or off does not change the slow-speed or direction realisation.
+        self._rng = np.random.default_rng(seed)
+        self._rng_dir = np.random.default_rng(None if seed is None else seed + 1)
+        rng_gust = np.random.default_rng(None if seed is None else seed + 2)
+
+        self._u_slow = 0.0      # slowly varying speed [m/s]
+        self._dbeta = 0.0       # slowly varying direction offset [rad]
+
+        if self.gust:
+            self._init_gust(rng_gust)
+
+    def _init_gust(self, rng: np.random.Generator) -> None:
+        """Discretise the NORSOK wind spectrum into N harmonic components."""
+        p = {"z": 10.0, "N": 100, "f_min": 0.005, "f_max": 0.5}
+        p.update(self.gust_params)
+        self.gust_params = p
+        z, N = float(p["z"]), int(p["N"])
+
+        df = (p["f_max"] - p["f_min"]) / N
+        f = p["f_min"] + df * (np.arange(N) + 0.5)          # bin centres [Hz]
+        S = (norsok_spectrum(f, self.mean_speed, z) if self.mean_speed > 0.0
+             else np.zeros(N))                              # no mean wind, no gust      
+
+        self._gust_amp = np.sqrt(2.0 * S * df)              # a_i
+        self._gust_freq = f + rng.uniform(-0.5 * df, 0.5 * df, N)
+        self._gust_phase = rng.uniform(0.0, 2.0 * np.pi, N)
+
+
     def step(
         self,
         t: float,
@@ -140,9 +185,46 @@ class Wind:
         eta: np.ndarray,
         nu: np.ndarray,
     ) -> Tuple[np.ndarray, Dict[str, float]]:
-        # TODO: Replace this placeholder with your wind load model.
-        # Default: no wind loads.
-        tau_w6 = np.zeros(6)
-        info = {"U": 0.0, "beta_ned": 0.0, "alpha_body": 0.0,
-                "U_mean": 0.0, "U_gust": 0.0}
+        # --- Slowly varying speed: 1st-order Gauss-Markov (Part 1) ---
+        if self.sigma_slow > 0.0 and self.tau_slow > 0.0:
+            a = np.exp(-dt / self.tau_slow)
+            self._u_slow = (a * self._u_slow + self.sigma_slow
+                            * np.sqrt(1.0 - a ** 2) * self._rng.standard_normal())
+        U_mean = max(self.mean_speed + self._u_slow, 0.0)
+
+        # --- Gust: sum of harmonics from the wind spectrum ---
+        U_gust = 0.0
+        if self.gust:
+            U_gust = float(np.sum(self._gust_amp * np.cos(
+                2.0 * np.pi * self._gust_freq * t + self._gust_phase)))
+        U = U_mean + U_gust
+
+        # --- Slowly varying direction: Gauss-Markov, bounded to dir_limit ---
+        if self.sigma_dir > 0.0 and self.tau_dir > 0.0:
+            a = np.exp(-dt / self.tau_dir)
+            self._dbeta = (a * self._dbeta + self.sigma_dir
+                           * np.sqrt(1.0 - a ** 2) * self._rng_dir.standard_normal())
+            self._dbeta = float(np.clip(self._dbeta, -self.dir_limit, self.dir_limit))
+        beta_t = float(np.arctan2(np.sin(self._beta_towards + self._dbeta),
+                                  np.cos(self._beta_towards + self._dbeta)))
+
+        # --- Relative wind and loads (Part 1) ---
+        U_load = max(U, 0.0)
+        psi = float(eta[5])
+        V_n = U_load * np.cos(beta_t)
+        V_e = U_load * np.sin(beta_t)
+        c, s = np.cos(psi), np.sin(psi)
+        V_rw_x = c * V_n + s * V_e - float(nu[0])
+        V_rw_y = -s * V_n + c * V_e - float(nu[1])
+
+        U_rw = float(np.hypot(V_rw_x, V_rw_y))
+        alpha_rw = float(np.arctan2(V_rw_y, V_rw_x))
+
+        alpha_deg = np.rad2deg(alpha_rw) % 360.0
+        C6 = np.array([np.interp(alpha_deg, self._alpha_deg, self._C6[:, j])
+                       for j in range(6)])
+        tau_w6 = U_rw ** 2 * C6
+
+        info = {"U": U, "beta_ned": beta_t, "alpha_body": alpha_rw,
+                "U_mean": U_mean, "U_gust": U_gust}
         return tau_w6, info

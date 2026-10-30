@@ -50,7 +50,11 @@ Constructor contract — the automated checks (``python check.py --part 2``,
 so your final tuned gains must be the ``__init__`` defaults.  Gains set only
 in ``run_case_part_2.py`` reach your own runs but not the checks.
 """
+
 import numpy as np
+from scipy.linalg import solve_continuous_are
+
+from simulation.utils import Rz, wrap_angle_pi
 
 
 class DPController:
@@ -62,11 +66,58 @@ class DPController:
     """
 
     def __init__(self, *args, **kwargs):
-        pass
+        # Physical 3-DOF matrices
+        self.M3 = np.array([[6.007e5, 0.0, 0.0], [0.0, 7.067e5, -4.733e5], [0.0, -5.712e5, 5.456e7]])
+        self.D3 = np.array([[1117.6, 0.0, 0.0], [0.0, 2.229e4, 0.0], [0.0, 0.0, 1.95e6]])
+        self.M3_inv = np.linalg.inv(self.M3)
+
+        # State-space matrices
+        O3 = np.zeros((3, 3))
+        I3 = np.eye(3)
+        self.A_c = np.block([[O3, I3], [O3, -self.M3_inv @ self.D3]])
+        self.B_c = np.block([[O3], [self.M3_inv]])
+
+        # LQR weights
+        default_Q = np.diag([0.04, 0.04, 131.31, 4, 4, 100 * 5])
+        default_R = np.diag([3.90625000e-11 * 6, 7.97193878e-11 * 3, 4.93151117e-13 * 12])
+        self.Q = kwargs.get("Q", default_Q)
+        self.R = kwargs.get("R", default_R)
+
+        # Check conditions for LQR solution
+        if not self.is_positive_semidefinite(self.Q):
+            raise ValueError("Q must be positive semi-definite.")
+        if not self.is_positive_definite(self.R):
+            raise ValueError("R must be positive definite.")
+        if not self.is_controllable(self.A_c, self.B_c):
+            raise ValueError("(A, B) is not controllable.")
+
+        # Gain matrix K
+        P = solve_continuous_are(a=self.A_c, b=self.B_c, q=self.Q, r=self.R)
+        self.K = np.linalg.inv(self.R) @ self.B_c.T @ P
+
+        # Steady-state correction
+        Kp = self.K[:, 0:3]
+        default_Ti = 5 * 1 / min(abs(np.real(self.LQR_cl_eigenvalues())))  # seconds
+        self.Ti = kwargs.get("Ti", default_Ti)
+        self.Ki = kwargs.get("Ki", Kp / self.Ti)
+
+        # Anti-windup
+        self.T_aw = kwargs.get("T_aw", 10.0)
+
+        # Runtime values
+        self.xi = np.zeros(3)
+        self._last_tau_d3 = np.zeros(3)
 
     def reset(self) -> None:
         """Optional: reset internal states (integrators, filters) before a run."""
-        pass
+        self.xi = np.zeros(3)
+        self._last_tau_d3 = np.zeros(3)
+
+    def apply_external_aw(self, tau_applied, psi, dt):
+        tau_applied3 = np.array([tau_applied[0], tau_applied[1], tau_applied[5]])
+        # Back-calculation: tau_i = -Ki xi, so pulling tau_i towards the applied wrench
+        # needs xi_dot = -Ki^-1 (tau_applied - tau_d) / T_aw
+        self.xi = self.xi - dt / self.T_aw * np.linalg.solve(self.Ki, tau_applied3 - self._last_tau_d3)
 
     def compute(
         self,
@@ -78,7 +129,168 @@ class DPController:
         nu_ref: np.ndarray | None = None,
         acc_ref: np.ndarray | None = None,
     ) -> np.ndarray:
-        # TODO: Replace this placeholder with your DP controller.
         # Return the (6,) desired BODY wrench — fill in tau_d[0] = Fx,
         # tau_d[1] = Fy, tau_d[5] = Mz and leave the rest zero.
-        return np.zeros(6)
+
+        # --- DEFINITIONS FROM DOCSTRING ---
+        # eta NED
+        N, E, psi = eta[0], eta[1], eta[5]  # NED
+
+        # nu BODY
+        u, v, r = nu[0], nu[1], nu[5]  # BODY
+
+        # eta_ref NED
+        N_d, E_d, psi_d = eta_ref[0], eta_ref[1], eta_ref[5]  # NED
+
+        # nu_ref NED
+        Ndot_d, Edot_d, psidot_d = 0, 0, 0  # NED
+
+        # acc_ref NED
+        Nddot_d, Eddot_d, psiddot_d = 0, 0, 0  # NED
+
+        J = Rz(psi)  # rotation matrix
+
+        # eta
+        # --- Nothing to handle here
+
+        # nu
+        nu3_b = np.array([u, v, r])  # BODY, current velocity,
+        nu3_ref_b = np.zeros_like(nu3_b)  # BODY, reference velocity
+
+        if nu_ref is not None:  # if nu_ref is defined
+            Ndot_d, Edot_d, psidot_d = (
+                nu_ref[0],
+                nu_ref[1],
+                nu_ref[5],
+            )  # NED, reference velocity
+            nu3_ref_n = np.array([Ndot_d, Edot_d, psidot_d])  # NED, reference velocity
+            nu3_ref_b = J.T @ nu3_ref_n  # BODY, reference velocity
+
+        # state errors
+        e_N = N - N_d  # NED, error in N
+        e_E = E - E_d  # NED, error in E
+        e_psi = wrap_angle_pi(psi - psi_d)  # NED, heading error psi
+
+        e_eta3_n = np.array([e_N, e_E, e_psi])  # NED, error matrix position
+        e_eta3_b = J.T @ e_eta3_n  #  BODY, error matrix position
+        e_nu3_b = nu3_b - nu3_ref_b  # BODY, error matrix velocity
+
+        # State vector
+        x_c = np.hstack((e_eta3_b.T, e_nu3_b.T))  # BODY, state vector
+
+        # integral steady-state correction
+        self.xi = self.xi + dt * e_eta3_b
+
+        # inertia feedforward
+        tau_ff = np.zeros_like(nu3_b)
+        if acc_ref is not None:  # if acc_ref is defined
+            Nddot_d, Eddot_d, psiddot_d = (
+                acc_ref[0],
+                acc_ref[1],
+                acc_ref[5],
+            )  # NED, reference accelarion
+            acc3_ref_n = np.array([Nddot_d, Eddot_d, psiddot_d])  # NED, reference acceleration
+            acc3_ref_b = J.T @ acc3_ref_n  # BODY, reference acceleration
+            tau_ff = self.M3 @ acc3_ref_b  # BODY, feedforward wrench
+
+        # Intertia wrench
+        tau_i = -self.Ki @ self.xi
+
+        # Feedback wrench
+        tau_fb = -self.K @ x_c
+
+        # Total wrench
+        tau_total = tau_fb + tau_i + tau_ff
+
+        # Save desired 3DOF wrench, BODY
+        self._last_tau_d3 = tau_total.copy()
+
+        # Desired 6x6 wrench
+        self.tau_d = np.zeros(6)
+        self.tau_d[0] = tau_total[0]
+        self.tau_d[1] = tau_total[1]
+        self.tau_d[5] = tau_total[2]
+
+        return self.tau_d
+
+    # HELPERS ---------------------------------------------------
+    def is_positive_definite(self, A: np.ndarray, tol: float = 1e-12) -> bool:
+        """Checks if A is square, symmetric, and positive definite (all eigenvalues > 0)."""
+        # A must be square
+        if A.ndim != 2 or A.shape[0] != A.shape[1]:
+            print("A is not square")
+            return False
+
+        # A must be symmetric
+        if not np.allclose(A, A.T, atol=tol):
+            print("A is not symmetric")
+            return False
+
+        # All eigenvalues must be strictly > 0 (with tolerance for floating-point noise)
+        eigvals = np.linalg.eigvalsh(A)
+        if not np.all(eigvals > 0):
+            print(f"Not all eigenvalues are > 0 (Min eigenvalue: {np.min(eigvals):.3e})")
+            return False
+
+        return True
+
+    def is_positive_semidefinite(self, A: np.ndarray, tol: float = 1e-12) -> bool:
+        """Checks if A is square, symmetric, and positive semi-definite (all eigenvalues >= 0)."""
+        # A must be square
+        if A.ndim != 2 or A.shape[0] != A.shape[1]:
+            print("A is not square")
+            return False
+
+        # A must be symmetric
+        if not np.allclose(A, A.T, atol=tol):
+            print("A is not symmetric")
+            return False
+
+        # All eigenvalues must be >= 0 (allowing for minor negative numerical noise down to -tol)
+        eigvals = np.linalg.eigvalsh(A)
+        if not np.all(eigvals >= -tol):
+            print(f"Not all eigenvalues are >= 0 (Min eigenvalue: {np.min(eigvals):.3e})")
+            return False
+
+        return True
+
+    def is_controllable(self, A: np.ndarray, B: np.ndarray) -> bool:
+        # A must be square
+        if A.ndim != 2 or A.shape[0] != A.shape[1]:
+            print("A is not square")
+            return False
+
+        # A is nxn, B is nxm
+        n = A.shape[0]
+        m = B.shape[1]
+
+        if B.shape[0] != n:
+            print(f"B does not have {n} rows")
+            return False
+
+        blocks = [np.linalg.matrix_power(A, i) @ B for i in range(n)]
+        M_c = np.hstack(blocks)  # Controllability matrix
+        rank = np.linalg.matrix_rank(M_c)
+
+        return rank == n
+
+    def LQRConditions(self) -> str:
+        """Returns LQR conditions status"""
+        s = ""
+        s += f"    Q is {'NOT ' if not self.is_positive_semidefinite(self.Q) else ''}positive semi-definite\n"
+        s += f"    R is {'NOT ' if not self.is_positive_definite(self.R) else ''}positive definite\n"
+        s += f"(A,B) is {'NOT ' if not self.is_controllable(self.A_c, self.B_c) else ''}controllable"
+        return s
+
+    def LQR_cl_eigenvalues(self):
+        """Returns closed-loop eigenvalues of the LQR controller"""
+        return np.linalg.eigvals(self.A_c - self.B_c @ self.K)
+
+    # VERIFICATION: since Ki is hand-picked, not ARE-derived, always check
+    # the resulting augmented closed-loop system is actually stable.
+    def augmented_eigenvalues(self):
+        C = np.hstack([np.eye(3), np.zeros((3, 3))])
+        A_aug = np.block([[np.zeros((3, 3)), C], [np.zeros((6, 3)), self.A_c]])
+        B_aug = np.block([[np.zeros((3, 3))], [self.B_c]])
+        K_full = np.hstack([self.Ki, self.K])  # (3,9): [xi-gain, x_c-gain]
+        return np.linalg.eigvals(A_aug - B_aug @ K_full)
