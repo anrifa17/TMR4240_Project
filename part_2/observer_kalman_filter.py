@@ -26,6 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 
+from simulation.utils import Rz, wrap_angle_pi
+
 
 @dataclass
 class ObserverEstimate:
@@ -54,24 +56,6 @@ class Observer:
         )
 
 
-class NonlinearPassiveObserver(Observer):
-    """Template for a nonlinear passive wave-filtering observer.
-
-    Suggested states are wave-frequency motion, low-frequency pose, BODY
-    velocity, and slowly-varying bias.  Implement the correction and model
-    propagation in :meth:`step`.
-    """
-
-    name = "nonlinear_passive"
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def step(self, t, dt, eta_measured, tau_est):
-        # TODO: implement the nonlinear passive observer.
-        return self._placeholder(eta_measured)
-
-
 class KalmanFilterObserver(Observer):
     """Template for a discrete KF/EKF observer.
 
@@ -83,17 +67,66 @@ class KalmanFilterObserver(Observer):
     name = "kalman"
 
     def __init__(self, *args, **kwargs):
-        pass
+        # Vessel model
+        self.M = np.array([[6.007e5, 0.0, 0.0], [0.0, 7.067e5, -4.733e5], [0.0, -5.712e5, 5.456e7]])
+        self.D = np.array([[1117.6, 0.0, 0.0], [0.0, 2.229e4, 0.0], [0.0, 0.0, 1.95e6]])
+        self.M_inv = np.linalg.inv(self.M3)
+
+        # Wave model
+        omega = 0.628 * np.ones(3)  # dominant wave frequency [rad/s]
+        zeta = 0.1 * np.ones(3)  # relative damping
+        sigma_wf = np.array([0.375, 0.375, 0.087])  # std of WF motion [m, m, rad]
+        Kw = 2.0 * np.sqrt(zeta * omega) * sigma_wf  # K_w,i = 2 sqrt(zeta_i omega_i) sigma_wf,i
+
+        # WF model
+        Z3, I3 = np.zeros((3, 3)), np.eye(3)
+        # np.block glues the four 3x3 blocks into one 6x6 matrix
+        self.Aw = np.block([[Z3, I3], [-np.diag(omega**2), -2.0 * np.diag(zeta * omega)]])
+        Cw = np.hstack([Z3, I3])  # 3x6, picks the "output" half of xi_w
+
+        # Bias model
+        Tb = 1000.0
+        self.Tb_inv = np.eye(3) / Tb
+
+        # Measurement matrix
+        self.H = np.hstack([Cw, I3, np.zeros((3, 6))])
+
+        # Noise Input matrix E
+        self.E = np.zeros((15, 6))
+        self.E[3:6, 0:3] = np.diag(Kw)  # wave noise enters the xi_w "velocity" half
+        self.E[9:12, 3:6] = np.eye(3)  # bias noise (E_b = I)
+
+        # Covariances
+        sigma_b = np.array([40e3, 40e3, 80e3])  # bias std [N, N, Nm]
+        # Continuous-time intensities Qc; converted to per-sample Q = Qc/dt inside step()
+        self.Qc = np.diag(np.concatenate([np.ones(3), 2.0 * sigma_b**2 / Tb]))
+        self.R = np.diag([0.2**2, 0.2**2, np.deg2rad(0.20) ** 2])
+
+        sigma_nu = np.array([0.3, 0.3, 0.3])  # initial velocity std
+        self.P0 = np.diag(
+            np.concatenate(
+                [
+                    sigma_wf**2 / omega**2,  # integrated wave states
+                    sigma_wf**2,  # wave output states
+                    sigma_wf**2,  # eta
+                    sigma_b**2,  # bias
+                    sigma_nu**2,  # nu
+                ]
+            )
+        )
+
+        self.reset()
 
     def step(self, t, dt, eta_measured, tau_est):
-        # TODO: implement the Kalman filter or extended Kalman filter.
+        idx = [0, 1, 5]
+
         return self._placeholder(eta_measured)
 
 
 def select_observer(kind: str, **kwargs) -> Observer:
     """Construct one observer without changing simulator code."""
     choices = {
-        "nonlinear_passive": NonlinearPassiveObserver,
+        # "nonlinear_passive": NonlinearPassiveObserver,
         "kalman": KalmanFilterObserver,
     }
     try:
