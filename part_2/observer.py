@@ -55,16 +55,6 @@ class Observer:
         )
 
 
-class NonlinearPassiveObserver(Observer):
-    """Template for a nonlinear passive wave-filtering observer.
-
-    Suggested states are wave-frequency motion, low-frequency pose, BODY
-    velocity, and slowly-varying bias.  Implement the correction and model
-    propagation in :meth:`step`.
-    """
-
-    name = "nonlinear_passive"
-
 def right_pi(angle: float) -> float:
     """Makes degree in right intervall (-pi, pi]."""
     return (angle + np.pi) % (2 * np.pi) - np.pi
