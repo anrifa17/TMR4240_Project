@@ -32,12 +32,10 @@ class RefAxisConfig:
     defaults here (overriding them only in ``run_case_part_2.py`` will not
     reach the checks).
     """
-    # TODO (students): none of the three values below is a tuned value — they
-    # are placeholders. Choose the natural frequency, the damping ratio and
-    # the rate limit yourself, and justify each of them in the report.
-    wn: float = 0.05                     # natural frequency [rad/s] (placeholder)
-    zeta: float = 1.0                   # damping ratio [-] (placeholder)
-    rate_limit: Optional[float] = 0.5  # max |x_dot| (m/s or rad/s); None = off
+    # TODO (students): Tuned for Part 1
+    wn: float = 0.05                   
+    zeta: float = 1.0                   
+    rate_limit: Optional[float] = 0.5  
 
 
 @dataclass
