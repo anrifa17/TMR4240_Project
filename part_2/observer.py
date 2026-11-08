@@ -235,7 +235,7 @@ class KalmanFilterObserver(Observer):
         self.M_inv = np.linalg.inv(self.M)
 
         # Wave model
-        omega = 0.628 * np.ones(3)  # dominant wave frequency [rad/s]
+        omega = 2.0 * np.pi / 8.0 * np.ones(3)  # dominant wave frequency [rad/s]
         zeta = 0.1 * np.ones(3)  # relative damping
         sigma_wf = np.array([0.375, 0.375, 0.087])  # std of WF motion [m, m, rad]
         Kw = 2.0 * np.sqrt(zeta * omega) * sigma_wf  # K_w,i = 2 sqrt(zeta_i omega_i) sigma_wf,i
