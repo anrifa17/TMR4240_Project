@@ -129,27 +129,29 @@ class NonlinearPassiveObserver(Observer):
         self.K3 = self.M @ np.diag(
             [3 * p**2] * 3
         )  # positive diagonal (passivity condition), passivity condition satisfied: K3 = M · K3_bar
-        self.K4 = np.diag(2.0 * Mii * p**3) # bias correction gain
+        self.K4 = np.diag(2.0 * Mii * p**3)  # bias correction gain
 
         self.check_stability()
 
     def check_stability(self):
-        """Eigenvalues of the linearised error dynamics (psi = 0). Must all be negative."""
         S = np.hstack([np.eye(3), self.Cw, np.zeros((3, 6))])
-        A = np.zeros((15, 15))
-        A[0:3, 9:12] = np.eye(3)
-        A[3:9, 3:9] = self.Aw
-        A[9:12, 9:12] = -self.M_inv @ self.D
-        A[9:12, 12:15] = self.M_inv
-        A[12:15, 12:15] = -self.Tb_inv
-        A[0:3] -= self.K2 @ S
-        A[3:9] -= self.K1 @ S
-        A[9:12] -= self.M_inv @ self.K3 @ S
-        A[12:15] -= self.K4 @ S
-        worst = np.linalg.eigvals(A).real.max()
-        print(f"NPO slowest pole: {worst:+.4f}  ({'stable' if worst < 0 else 'UNSTABLE'})")
+        worst = -np.inf
+        for psi in np.radians(np.arange(0, 360, 15)):
+            J = Rz(psi)
+            A = np.zeros((15, 15))
+            A[0:3, 9:12] = J
+            A[3:9, 3:9] = self.Aw
+            A[9:12, 9:12] = -self.M_inv @ self.D
+            A[9:12, 12:15] = self.M_inv @ J.T
+            A[12:15, 12:15] = -self.Tb_inv
+            A[0:3] -= self.K2 @ S
+            A[3:9] -= self.K1 @ S
+            A[9:12] -= self.M_inv @ J.T @ self.K3 @ S
+            A[12:15] -= self.K4 @ S
+            worst = max(worst, np.linalg.eigvals(A).real.max())
+        print(f"NPO slowest pole over all headings: {worst:+.4f}")
         if worst >= 0:
-            raise ValueError("NPO gains give an unstable observer")
+            raise ValueError("NPO gains give an unstable observer at some heading")
 
     def reset(self, eta0=None):
         """Called by the simulator with the true initial pose before each run."""
@@ -180,7 +182,8 @@ class NonlinearPassiveObserver(Observer):
 
         eta_dot = J @ nu3 + self.K2 @ y_tilde
 
-        nu_dot = self.M_inv @ (-self.D @ nu3 + Jt @ self.b_hat + tau3 + self.K3 @ y_tilde)
+        # nu_dot = self.M_inv @ (-self.D @ nu3 + Jt @ self.b_hat + tau3 + self.K3 @ y_tilde)
+        nu_dot = self.M_inv @ (-self.D @ nu3 + Jt @ self.b_hat + tau3 + Jt @ self.K3 @ y_tilde)
 
         b_dot = -self.Tb_inv @ self.b_hat + self.K4 @ y_tilde
 
@@ -232,7 +235,7 @@ class KalmanFilterObserver(Observer):
         self.M_inv = np.linalg.inv(self.M)
 
         # Wave model
-        omega = 0.628 * np.ones(3)  # dominant wave frequency [rad/s]
+        omega = 2.0 * np.pi / 8.0 * np.ones(3)  # dominant wave frequency [rad/s]
         zeta = 0.1 * np.ones(3)  # relative damping
         sigma_wf = np.array([0.375, 0.375, 0.087])  # std of WF motion [m, m, rad]
         Kw = 2.0 * np.sqrt(zeta * omega) * sigma_wf  # K_w,i = 2 sqrt(zeta_i omega_i) sigma_wf,i
